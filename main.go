@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/hashicorp/nomad/api"
 	"github.com/moby/term"
 	"golang.org/x/sys/unix"
@@ -14,28 +15,100 @@ import (
 	"syscall"
 )
 
+type execFinishedMsg struct{ err error }
+
+type cmd struct {
+	tea.ExecCommand
+}
+
+func (c cmd) Run() error {
+	_, err := allocExec()
+	return err
+}
+
+func (c cmd) SetStdin(r io.Reader) {
+	return
+}
+
+func (c cmd) SetStdout(w io.Writer) {
+	return
+}
+
+func (c cmd) SetStderr(w io.Writer) {
+	return
+}
+
+func runAllocExec() tea.Cmd {
+	return tea.Exec(cmd{}, func(err error) tea.Msg {
+		return execFinishedMsg{err}
+	})
+}
+
+type model struct {
+	err     error
+	lastMsg tea.Msg
+}
+
+func (m model) Init() tea.Cmd {
+	return nil
+}
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	m.lastMsg = msg
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "e":
+			return m, runAllocExec()
+		case "ctrl+c", "q":
+			return m, tea.Quit
+		}
+	case execFinishedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			return m, tea.Quit
+		}
+	}
+	return m, nil
+}
+
+func (m model) View() string {
+	if m.err != nil {
+		return "Error: " + m.err.Error() + "\n"
+	}
+	return fmt.Sprintf("Msg %T\nPress 'e' to run.\nPress 'q' to quit.\n", m.lastMsg)
+}
+
 func main() {
+	m := model{}
+	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
+		fmt.Println("Error running program:", err)
+		os.Exit(1)
+	}
+}
+
+func allocExec() (int, error) {
 	fmt.Println("Hello world")
 
 	client, err := api.NewClient(clientConfig())
 	if err != nil {
 		fmt.Printf("Error initializing client: %v", err)
-		os.Exit(1)
+		return 1, err
 	}
 
 	q := &api.QueryOptions{Namespace: "default"}
 	alloc, _, err := client.Allocations().Info("e48de9e2-7195-5c02-130b-808aed4c77b4", q)
 	if err != nil {
 		fmt.Printf("Error querying allocation: %s", err)
-		os.Exit(1)
+		return 1, err
 	}
 
 	code, err := execImpl(client, alloc, "redis", true, []string{"sh"}, "~", os.Stdin, os.Stdout, os.Stderr)
 	if err != nil {
 		fmt.Printf("failed to exec into task: %v", err)
-		os.Exit(1)
+		return 1, err
 	}
-	os.Exit(code)
+	return code, nil
 }
 
 func clientConfig() *api.Config {
