@@ -15,6 +15,10 @@ import (
 	"syscall"
 )
 
+// IDEAS:
+// check if the not a terminal thing is under my control (duplicate stdin or use setstdin with p.input)
+// run ExecProcess with a subcommand like `wander exec`
+
 type execFinishedMsg struct{ err error }
 
 type cmd struct {
@@ -169,7 +173,10 @@ func execImpl(client *api.Client, alloc *api.Allocation, task string,
 	sizeCh := make(chan api.TerminalSize, 1)
 
 	ctx, cancelFn := context.WithCancel(context.Background())
-	defer cancelFn()
+	actuallyCancel := func() {
+		cancelFn()
+	}
+	defer actuallyCancel()
 
 	inCleanup, err := setRawTerminal(stdin)
 	if err != nil {
@@ -189,7 +196,7 @@ func execImpl(client *api.Client, alloc *api.Allocation, task string,
 	}
 	defer sizeCleanup()
 
-	stdin = NewReader(stdin, escapeChar[0], func(c byte) bool {
+	stdin = NewReader(ctx, stdin, escapeChar[0], func(c byte) bool {
 		switch c {
 		case '.':
 			// need to restore tty state so error reporting here
@@ -223,7 +230,7 @@ func execImpl(client *api.Client, alloc *api.Allocation, task string,
 func setRawTerminal(stream interface{}) (cleanup func(), err error) {
 	fd, isTerminal := term.GetFdInfo(stream)
 	if !isTerminal {
-		return nil, errors.New("not a terminal")
+		return nil, errors.New("not a terminal!!")
 	}
 
 	state, err := term.SetRawTerminal(fd)
@@ -242,7 +249,7 @@ func setRawTerminal(stream interface{}) (cleanup func(), err error) {
 func setRawTerminalOutput(stream interface{}) (cleanup func(), err error) {
 	fd, isTerminal := term.GetFdInfo(stream)
 	if !isTerminal {
-		return nil, errors.New("not a terminal")
+		return nil, errors.New("not a terminal!!!")
 	}
 
 	state, err := term.SetRawTerminalOutput(fd)
@@ -260,7 +267,7 @@ func setRawTerminalOutput(stream interface{}) (cleanup func(), err error) {
 func watchTerminalSize(out io.Writer, resize chan<- api.TerminalSize) (func(), error) {
 	fd, isTerminal := term.GetFdInfo(out)
 	if !isTerminal {
-		return nil, errors.New("not a terminal")
+		return nil, errors.New("not a terminal!")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -319,16 +326,16 @@ type Handler func(c byte) bool
 //   - `~` and it's the last character in stream, it's propagated
 //
 // Appearances of `~` when not preceded by a new line are propagated unmodified.
-func NewReader(r io.Reader, c byte, h Handler) io.Reader {
+func NewReader(ctx context.Context, r io.Reader, c byte, h Handler) io.Reader {
 	pr, pw := io.Pipe()
 	reader := &reader{
-		impl:       r,
+		impl:       r, // stdin
 		escapeChar: c,
 		handler:    h,
 		pr:         pr,
 		pw:         pw,
 	}
-	go reader.pipe()
+	go reader.pipe(ctx)
 	return reader
 }
 
@@ -364,16 +371,22 @@ func (r *reader) Read(buf []byte) (int, error) {
 }
 
 // TODO LEO: cancel channel if back to bubble tea??
-func (r *reader) pipe() {
+func (r *reader) pipe(ctx context.Context) {
 	rb := make([]byte, 4096)
 	bw := bufio.NewWriter(r.pw)
 
 	state := sLookEscapeChar
 
-	for {
+	for ctx.Err() == nil {
+		// read from stdin into the buffer
 		n, err := r.impl.Read(rb)
 
-		if n > 0 {
+		// issue:
+		//  ctx open
+		//  read from stdin
+		//  ctx closed
+		//  next key is processBuf, not keymsg
+		if n > 0 && ctx.Err() == nil {
 			state = r.processBuf(bw, rb, n, state)
 			bw.Flush()
 			if state == sLookChar {
