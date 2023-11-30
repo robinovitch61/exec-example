@@ -23,7 +23,14 @@ type cmd struct {
 
 func (c cmd) Run() error {
 	_, err := allocExec()
-	return err
+
+	//r := exec.Command("bash")
+	//err := r.Run()
+
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (c cmd) SetStdin(r io.Reader) {
@@ -88,8 +95,6 @@ func main() {
 }
 
 func allocExec() (int, error) {
-	fmt.Println("Hello world")
-
 	client, err := api.NewClient(clientConfig())
 	if err != nil {
 		fmt.Printf("Error initializing client: %v", err)
@@ -103,7 +108,7 @@ func allocExec() (int, error) {
 		return 1, err
 	}
 
-	code, err := execImpl(client, alloc, "redis", true, []string{"sh"}, "~", os.Stdin, os.Stdout, os.Stderr)
+	code, err := execImpl(client, alloc, "redis", []string{"sh"}, "~", os.Stdin, os.Stdout, os.Stderr)
 	if err != nil {
 		fmt.Printf("failed to exec into task: %v", err)
 		return 1, err
@@ -158,7 +163,7 @@ func clientConfig() *api.Config {
 }
 
 // execImpl invokes the Alloc Exec api call, it also prepares and restores terminal states as necessary.
-func execImpl(client *api.Client, alloc *api.Allocation, task string, tty bool,
+func execImpl(client *api.Client, alloc *api.Allocation, task string,
 	command []string, escapeChar string, stdin io.Reader, stdout, stderr io.WriteCloser) (int, error) {
 
 	sizeCh := make(chan api.TerminalSize, 1)
@@ -166,48 +171,39 @@ func execImpl(client *api.Client, alloc *api.Allocation, task string, tty bool,
 	ctx, cancelFn := context.WithCancel(context.Background())
 	defer cancelFn()
 
-	// When tty, ensures we capture all user input and monitor terminal resizes.
-	if tty {
-		if stdin == nil {
-			return -1, fmt.Errorf("stdin is null")
-		}
-
-		inCleanup, err := setRawTerminal(stdin)
-		if err != nil {
-			return -1, err
-		}
-		defer inCleanup()
-
-		outCleanup, err := setRawTerminalOutput(stdout)
-		if err != nil {
-			return -1, err
-		}
-		defer outCleanup()
-
-		sizeCleanup, err := watchTerminalSize(stdout, sizeCh)
-		if err != nil {
-			return -1, err
-		}
-		defer sizeCleanup()
-
-		if escapeChar != "" {
-			stdin = NewReader(stdin, escapeChar[0], func(c byte) bool {
-				switch c {
-				case '.':
-					// need to restore tty state so error reporting here
-					// gets emitted at beginning of line
-					outCleanup()
-					inCleanup()
-
-					stderr.Write([]byte("\nConnection closed\n"))
-					cancelFn()
-					return true
-				default:
-					return false
-				}
-			})
-		}
+	inCleanup, err := setRawTerminal(stdin)
+	if err != nil {
+		return -1, err
 	}
+	defer inCleanup()
+
+	outCleanup, err := setRawTerminalOutput(stdout)
+	if err != nil {
+		return -1, err
+	}
+	defer outCleanup()
+
+	sizeCleanup, err := watchTerminalSize(stdout, sizeCh)
+	if err != nil {
+		return -1, err
+	}
+	defer sizeCleanup()
+
+	stdin = NewReader(stdin, escapeChar[0], func(c byte) bool {
+		switch c {
+		case '.':
+			// need to restore tty state so error reporting here
+			// gets emitted at beginning of line
+			outCleanup()
+			inCleanup()
+
+			stderr.Write([]byte("\nConnection closed\n"))
+			cancelFn()
+			return true
+		default:
+			return false
+		}
+	})
 
 	signalCh := make(chan os.Signal, 1)
 	signal.Notify(signalCh, os.Interrupt, syscall.SIGTERM)
@@ -218,14 +214,7 @@ func execImpl(client *api.Client, alloc *api.Allocation, task string, tty bool,
 	}()
 
 	return client.Allocations().Exec(ctx,
-		alloc, task, tty, command, stdin, stdout, stderr, sizeCh, nil)
-}
-
-// isTty returns true if both stdin and stdout are a TTY
-func isTty() bool {
-	_, isStdinTerminal := term.GetFdInfo(os.Stdin)
-	_, isStdoutTerminal := term.GetFdInfo(os.Stdout)
-	return isStdinTerminal && isStdoutTerminal
+		alloc, task, true, command, stdin, stdout, stderr, sizeCh, nil)
 }
 
 // setRawTerminal sets the stream terminal in raw mode, so process captures
@@ -242,7 +231,9 @@ func setRawTerminal(stream interface{}) (cleanup func(), err error) {
 		return nil, err
 	}
 
-	return func() { term.RestoreTerminal(fd, state) }, nil
+	return func() {
+		term.RestoreTerminal(fd, state)
+	}, nil
 }
 
 // setRawTerminalOutput sets the output stream in Windows to raw mode,
@@ -255,11 +246,14 @@ func setRawTerminalOutput(stream interface{}) (cleanup func(), err error) {
 	}
 
 	state, err := term.SetRawTerminalOutput(fd)
+	//_, err = term.SetRawTerminalOutput(fd)
 	if err != nil {
 		return nil, err
 	}
 
-	return func() { term.RestoreTerminal(fd, state) }, nil
+	return func() {
+		term.RestoreTerminal(fd, state)
+	}, nil
 }
 
 // watchTerminalSize watches terminal size changes to propagate to remote tty.
@@ -369,6 +363,7 @@ func (r *reader) Read(buf []byte) (int, error) {
 	return r.pr.Read(buf)
 }
 
+// TODO LEO: cancel channel if back to bubble tea??
 func (r *reader) pipe() {
 	rb := make([]byte, 4096)
 	bw := bufio.NewWriter(r.pw)
